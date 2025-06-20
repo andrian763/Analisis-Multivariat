@@ -1,5 +1,5 @@
 # 📊 Analisis Multivariat – Prediksi Status Pinjaman Nasabah
-
+Dataset : https://www.kaggle.com/datasets/altruistdelhite04/loan-prediction-problem-dataset?select=train_u6lujuX_CVtuZ9i.csv
 Repositori ini berisi implementasi tugas akhir mata kuliah **Analisis Multivariat** yang memanfaatkan teknik **Linear Discriminant Analysis (LDA)** dan **Regresi Logistik** untuk memprediksi status kelayakan pinjaman (Loan_Status) pada data pinjaman nasabah.
 
 Proyek ini dilakukan menggunakan bahasa pemrograman **R** dan mencakup keseluruhan pipeline analisis: mulai dari pemahaman dataset, preprocessing lanjutan, eksplorasi data, pelatihan model, hingga evaluasi kinerja klasifikasi.
