@@ -1,0 +1,564 @@
+---
+title: "Tugas Akhir Analisis Multivariat"
+output:
+  html_document: default
+  pdf_document: default
+date: "2025-05-21"
+---
+
+1.  PENGENALAN DATASET
+
+```{r}
+library(readr)
+train_path <- "C:/Users/ASUS/Downloads/train_u6lujuX_CVtuZ9i.csv"
+train_df <- read_csv(train_path, show_col_types = FALSE)
+
+# Cek data
+head(train_df)
+```
+
+```{r}
+test_path <- "C:/Users/ASUS/Downloads/test_Y3wMUE5_7gLdaTN.csv"
+test_df <- read_csv(test_path, show_col_types = FALSE)
+head(test_df)
+```
+
+```{r}
+# Analisis data train
+cat("Data Train\n")
+print(head(train_df))
+print(dim(train_df))
+print(str(train_df))
+print(summary(train_df))
+print(sapply(train_df, class))
+print(colSums(is.na(train_df)))
+cat("Jumlah baris duplikat:", sum(duplicated(train_df)), "\n")
+```
+
+```{r}
+# Analisis data test
+cat("Data Test\n")
+print(head(test_df))
+print(dim(test_df))
+print(str(test_df))
+print(summary(test_df))
+print(sapply(test_df, class))
+print(colSums(is.na(test_df)))
+cat("Jumlah baris duplikat:", sum(duplicated(test_df)), "\n")
+```
+
+2.  PREPROCESSING
+
+    a)  Hapus Kolom Loan Id
+
+```{r}
+library(dplyr)
+train_df <- train_df %>% select(-Loan_ID)
+test_df <- test_df %>% select(-Loan_ID)
+```
+
+b)  Tentukan target
+
+```{r}
+target_col <- "Loan_Status"
+```
+
+c)  Identifikasi Kolom Numerik
+
+```{r}
+num_cols <- names(train_df)[sapply(train_df, is.numeric)]
+cat_cols <- setdiff(names(train_df)[sapply(train_df, is.character)], target_col)
+```
+
+d)  Imputasi Missing Value
+
+```{r}
+library(caret)
+# Imputasi numerik dengan median
+for(col in num_cols) {
+  median_val <- median(train_df[[col]], na.rm = TRUE)
+  train_df[[col]][is.na(train_df[[col]])] <- median_val
+  test_df[[col]][is.na(test_df[[col]])] <- median_val
+}
+
+# Imputasi kategorikal dengan modus (nilai paling sering)
+get_mode <- function(v) {
+  uniqv <- unique(v[!is.na(v)])
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+for(col in cat_cols) {
+  mode_val <- get_mode(train_df[[col]])
+  train_df[[col]][is.na(train_df[[col]])] <- mode_val
+  test_df[[col]][is.na(test_df[[col]])] <- mode_val
+}
+```
+
+e)  Encoding Target
+
+```{r}
+train_df[[target_col]] <- ifelse(train_df[[target_col]] == "Y", 1, 0)
+```
+
+f)  Gabungkan train test untuk one hot encoding
+
+```{r}
+library(dplyr)
+library(fastDummies)
+# Buat dataframe tanpa kolom target dari train, lalu gabung dengan test
+combined <- bind_rows(
+  train_df %>% select(-all_of(target_col)),
+  test_df
+)
+
+# One-hot encoding dengan menghapus kategori pertama (drop_first=True)
+combined_encoded <- dummy_cols(combined, remove_selected_columns = TRUE, remove_first_dummy = TRUE)
+
+```
+
+g)  Pisahkan kembali train dan test
+
+```{r}
+n_train <- nrow(train_df)
+
+X_train <- combined_encoded[1:n_train, ]
+X_test <- combined_encoded[(n_train + 1):nrow(combined_encoded), ]
+
+y_train <- train_df[[target_col]]
+
+```
+
+h)  Penangan outlier
+
+```{r}
+# Fungsi clipping berdasarkan IQR
+clip_outliers <- function(df, numeric_cols) {
+  for (col in numeric_cols) {
+    Q1 <- quantile(df[[col]], 0.25, na.rm = TRUE)
+    Q3 <- quantile(df[[col]], 0.75, na.rm = TRUE)
+    IQR <- Q3 - Q1
+    lower_bound <- Q1 - 1.5 * IQR
+    upper_bound <- Q3 + 1.5 * IQR
+    df[[col]][df[[col]] < lower_bound] <- lower_bound
+    df[[col]][df[[col]] > upper_bound] <- upper_bound
+  }
+  return(df)
+}
+
+# Identifikasi kolom numerik pada combined_encoded
+num_cols_encoded <- names(combined_encoded)[sapply(combined_encoded, is.numeric)]
+
+# Terapkan clipping pada train dan test secara terpisah untuk menghindari data leakage
+combined_encoded[1:n_train, ] <- clip_outliers(combined_encoded[1:n_train, ], num_cols_encoded)
+combined_encoded[(n_train + 1):nrow(combined_encoded), ] <- clip_outliers(combined_encoded[(n_train + 1):nrow(combined_encoded), ], num_cols_encoded)
+
+```
+
+i)  Penanganan data imbalance
+
+```{r}
+library(smotefamily)
+
+# Membuat dataframe train dengan label
+train_for_smote <- cbind(X_train, Loan_Status = y_train)
+
+# SMOTE dengan smotefamily
+set.seed(42)
+smote_output <- SMOTE(train_for_smote[ , !(names(train_for_smote) %in% "Loan_Status")], 
+                      train_for_smote$Loan_Status, 
+                      K = 5, 
+                      dup_size = 0) # dup_size=0 berarti tidak menambah data sintetis terlalu banyak
+
+# smote_output berisi list dengan data sintetis dan label baru
+X_train_smote <- smote_output$data[, -ncol(smote_output$data)]
+y_train_smote <- smote_output$data[, ncol(smote_output$data)]
+y_train_smote <- as.factor(y_train_smote)
+
+# Update X_train dan y_train dengan hasil SMOTE
+X_train <- X_train_smote
+y_train <- y_train_smote
+
+```
+
+j)  Scaling Fitur Numerik
+
+```{r}
+X_train_scaled <- scale(X_train)
+X_test_scaled <- scale(X_test, center = attr(X_train_scaled, "scaled:center"), scale = attr(X_train_scaled, "scaled:scale"))
+```
+
+k)  Split data training menjadi training dan validation set
+
+```{r}
+library(caret)
+
+set.seed(42)
+train_index <- createDataPartition(y_train, p = 0.8, list = FALSE, times = 1)
+
+X_tr <- X_train_scaled[train_index, ]
+X_val <- X_train_scaled[-train_index, ]
+
+y_tr <- y_train[train_index]
+y_val <- y_train[-train_index]
+```
+
+```{r}
+dupes_train <- sum(duplicated(X_train))
+dupes_test <- sum(duplicated(X_test))
+
+if (dupes_train > 0) {
+  idx_unique <- !duplicated(X_train)
+  X_train <- X_train[idx_unique, ]
+  y_train <- y_train[idx_unique]
+}
+```
+
+3.  EDA
+
+    a)  Distribusi target Loan_Status
+
+```{r}
+ggplot(train_df, aes(x = Loan_Status)) +
+  geom_bar(fill = c("red", "green")) +
+  labs(title = "Distribusi Loan_Status (Sebelum Preprocessing)",
+       x = "Loan_Status", y = "Jumlah") +
+  theme_minimal()
+
+
+```
+
+```{r}
+barplot(table(y_train), col = c("red", "green"),
+        main = "Distribusi Loan_Status (Setelah Preprocessing dan SMOTE)",
+        xlab = "Loan_Status", ylab = "Jumlah")
+```
+
+b)  Boxplot Outlier
+
+```{r}
+library(ggplot2)
+
+num_features <- c("ApplicantIncome", "LoanAmount")
+
+for (feature in num_features) {
+  p <- ggplot(train_df, aes_string(y = feature)) +
+    geom_boxplot(fill = "tomato", outlier.color = "red", outlier.shape = 16) +
+    labs(title = paste("Boxplot", feature, "(Sebelum Preprocessing)"),
+         y = feature) +
+    theme_minimal()
+  print(p)
+}
+
+
+
+```
+
+```{r}
+library(ggplot2)
+
+num_features <- c("ApplicantIncome", "LoanAmount")
+
+for (feature in num_features) {
+  # Cari index kolom fitur di X_train_scaled
+  idx <- which(colnames(X_train_scaled) == feature)
+  
+  if (length(idx) == 0) {
+    # Jika nama fitur tidak ditemukan (mungkin karena encoding), gunakan kolom pertama sebagai contoh
+    idx <- 1
+  }
+  
+  df_scaled <- data.frame(
+    Value = X_train_scaled[, idx]
+  )
+  
+  p <- ggplot(df_scaled, aes(y = Value)) +
+    geom_boxplot(fill = "steelblue", outlier.color = "blue", outlier.shape = 16) +
+    labs(title = paste("Boxplot", feature, "(Setelah Scaling)"),
+         y = feature) +
+    theme_minimal()
+  print(p)
+}
+
+
+```
+
+c)  Heatmap Korelasi
+
+```{r}
+library(corrplot)
+
+# Identifikasi kolom numerik di train_df
+num_cols <- names(train_df)[sapply(train_df, is.numeric)]
+
+# Hitung matriks korelasi hanya pada kolom numerik (handle missing dengan complete.obs)
+cor_mat <- cor(train_df[, num_cols], use = "complete.obs")
+
+# Plot korelasi fitur numerik
+corrplot(cor_mat, method = "color", addCoef.col = "black",
+         tl.col = "black", number.cex = 0.7,
+         title = "Korelasi Fitur Numerik",
+         mar = c(0, 0, 1, 0))
+
+
+
+```
+
+4.  LDA
+
+
+a)  Uji Asumsi
+
+-   Homogenitas Matriks Kovarians (Box’s M Test)
+
+```{r}
+library(biotools)
+train_data <- data.frame(X_tr)
+train_data$target <- as.factor(y_tr)
+boxm_result <- boxM(train_data[, !(colnames(train_data) %in% "target")], train_data$target)
+print(boxm_result)
+
+```
+
+b)  Signifikansi Variabel
+
+```{r}
+library(MASS)
+
+lda_model <- lda(target ~ ., data = train_data)
+
+print("Ringkasan Model LDA:")
+print(lda_model)
+```
+
+c)  Akurasi Model -Membuat prediksi kelas dan probabilitas:
+
+```{r}
+val_data <- data.frame(X_val)
+val_data$target <- as.factor(y_val)
+lda_pred_class <- predict(lda_model, newdata = val_data)$class
+lda_pred_prob <- predict(lda_model, newdata = val_data)$posterior[, 2]
+
+```
+
+-   Menghitung Confusion Matrix dan metrik utama:
+
+```{r}
+val_target_factor <- as.factor(val_data$target)
+cm <- confusionMatrix(lda_pred_class, val_target_factor, positive = levels(val_target_factor)[2])
+cat(sprintf("Akurasi      : %.4f\n", cm$overall["Accuracy"]))
+cat(sprintf("Precision   : %.4f\n", cm$byClass["Precision"]))
+cat(sprintf("Recall      : %.4f\n", cm$byClass["Recall"]))
+cat(sprintf("F1-Score    : %.4f\n", cm$byClass["F1"]))
+
+```
+
+-   Evaluasi ROC AUC:
+
+```{r}
+library(pROC)
+val_target_factor <- as.factor(val_data$target)
+roc_obj <- roc(val_target_factor, lda_pred_prob, levels=rev(levels(val_target_factor)))
+auc_val <- auc(roc_obj)
+cat(sprintf("ROC AUC     : %.4f\n", auc_val))
+
+```
+
+d)  Interpretasi Model
+
+-Koefisien diskriminan (menunjukkan kontribusi tiap variabel):
+
+```{r}
+print(lda_model$scaling)
+
+```
+
+-   Prior probabilities tiap kelas:
+
+```{r}
+print(lda_model$prior)
+
+```
+
+-   Rata-rata variabel per kelas (means):
+
+```{r}
+print(lda_model$means)
+
+```
+
+e)  Visualisasi
+
+```{r}
+cm <- confusionMatrix(lda_pred_class, val_target_factor, positive = levels(val_target_factor)[2])
+cm_table <- as.data.frame(cm$table)
+colnames(cm_table) <- c("Reference", "Prediction", "Freq")
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  scale_fill_gradient(low = "lightblue", high = "blue") +
+  ggtitle("Confusion Matrix") +
+  theme_minimal()
+
+```
+
+```{r}
+metrics_df <- data.frame(
+  Metric = c("Precision", "Recall", "F1"),
+  Value = c(cm$byClass["Precision"], cm$byClass["Recall"], cm$byClass["F1"])
+)
+
+ggplot(metrics_df, aes(x = Metric, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  geom_text(aes(label = sprintf("%.2f", Value)), vjust = -0.3, size = 5) +
+  ylim(0, 1) +
+  ggtitle("Classification Report Metrics") +
+  theme_minimal() +
+  guides(fill = FALSE)
+
+```
+
+```{r}
+plot(roc_obj, col = "blue", lwd = 2, main = "ROC Curve - Linear Discriminant Analysis")
+abline(a=0, b=1, lty=2, col="gray")
+
+```
+
+5.  Logistic Regression Logistic Reggression
+
+<!-- -->
+
+a)  Pembentukan Model (Estimasi Parameter)
+
+```{r}
+# Load library
+library(caret)
+library(pROC)
+library(ggplot2)
+library(reshape2)
+
+# Data training dan validation
+train_data <- data.frame(X_tr)
+train_data$target <- as.factor(y_tr)
+
+val_data <- data.frame(X_val)
+val_data$target <- as.factor(y_val)
+
+# Fit model regresi logistik (estimasi parameter)
+logreg_model <- glm(target ~ ., data = train_data, family = binomial)
+
+# Tampilkan ringkasan model
+summary(logreg_model)
+
+```
+
+b)  Uji Signifikansi Variabel
+
+-   Uji Serentak (Overall Model Significance) — Likelihood Ratio Test (Model vs Null)
+
+```{r}
+# Model null (hanya intercept)
+null_model <- glm(target ~ 1, data = train_data, family = binomial)
+
+# Likelihood ratio test
+lr_test <- anova(null_model, logreg_model, test = "Chisq")
+print(lr_test)
+
+```
+
+-   Uji Parsial (Signifikansi Tiap Variabel) — lihat p-value dari summary(model)
+
+```{r}
+# Sudah tersedia di summary(logreg_model)
+# Contoh akses p-value
+coef_summary <- summary(logreg_model)$coefficients
+print(coef_summary)
+
+```
+
+c)  Evaluasi Akurasi Model
+
+```{r}
+# Prediksi probabilitas kelas positif pada validation set
+logreg_pred_prob <- predict(logreg_model, newdata = val_data, type = "response")
+
+# Prediksi kelas dengan cutoff 0.5
+logreg_pred_class <- ifelse(logreg_pred_prob > 0.5, levels(val_data$target)[2], levels(val_data$target)[1])
+logreg_pred_class <- factor(logreg_pred_class, levels = levels(val_data$target))
+
+# Confusion Matrix dan metrik evaluasi
+cm <- confusionMatrix(logreg_pred_class, val_data$target, positive = levels(val_data$target)[2])
+
+cat("=== Evaluasi Model Logistic Regression ===\n")
+cat(sprintf("Akurasi      : %.4f (%.2f%%)\n", cm$overall["Accuracy"], cm$overall["Accuracy"]*100))
+cat(sprintf("Precision   : %.4f (%.2f%%)\n", cm$byClass["Precision"], cm$byClass["Precision"]*100))
+cat(sprintf("Recall      : %.4f (%.2f%%)\n", cm$byClass["Recall"], cm$byClass["Recall"]*100))
+cat(sprintf("F1-Score    : %.4f (%.2f%%)\n", cm$byClass["F1"], cm$byClass["F1"]*100))
+
+# ROC dan AUC
+roc_obj <- roc(val_data$target, logreg_pred_prob, levels=rev(levels(val_data$target)))
+auc_val <- auc(roc_obj)
+cat(sprintf("ROC AUC     : %.4f (%.2f%%)\n", auc_val, auc_val*100))
+
+```
+
+d)  Interpretasi dengan Odds Ratio dan Confidence Interval
+
+```{r}
+# Ekstrak koefisien dan hitung odds ratio
+coef_estimates <- coef(logreg_model)
+odds_ratios <- exp(coef_estimates)
+
+# Hitung Confidence Interval 95% untuk odds ratio
+conf_int <- confint(logreg_model)
+odds_ratios_ci <- exp(conf_int)
+
+# Gabungkan hasil
+or_table <- data.frame(
+  Estimate = coef_estimates,
+  OddsRatio = odds_ratios,
+  CI_Lower = odds_ratios_ci[,1],
+  CI_Upper = odds_ratios_ci[,2]
+)
+
+print("Tabel Odds Ratio dan Interval Kepercayaan 95%:")
+print(or_table)
+
+```
+
+e)  Visualisasi Evaluasi Hasil
+
+```{r}
+# Confusion Matrix heatmap
+cm_table <- as.data.frame(cm$table)
+colnames(cm_table) <- c("Reference", "Prediction", "Freq")
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  scale_fill_gradient(low = "lightblue", high = "blue") +
+  ggtitle("Confusion Matrix - Logistic Regression") +
+  theme_minimal()
+```
+
+```{r}
+# Barplot metrik Precision, Recall, F1
+metrics_df <- data.frame(
+  Metric = c("Precision", "Recall", "F1"),
+  Value = c(cm$byClass["Precision"], cm$byClass["Recall"], cm$byClass["F1"])
+)
+
+ggplot(metrics_df, aes(x = Metric, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  geom_text(aes(label = sprintf("%.2f", Value)), vjust = -0.3, size = 5) +
+  ylim(0, 1) +
+  ggtitle("Classification Report Metrics (Precision, Recall, F1-Score)") +
+  theme_minimal() +
+  guides(fill = FALSE)
+```
+
+```{r}
+# Plot ROC Curve
+plot(roc_obj, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a=0, b=1, lty=2, col="gray")
+```
